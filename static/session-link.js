@@ -26,7 +26,8 @@
     //                   already handled an auth failure (sign-in or denied)
     //   connect(name)   attach the terminal to this session
     //   showPicker()    show the session picker as on a normal load
-    //   replaceState(u) replace the address bar with u (same origin)
+    //   replaceState(u) replace the address bar with u (an absolute URL on
+    //                   this origin)
     async function start(env) {
         var url = new URL(env.href);
         if (!url.searchParams.has('session')) {
@@ -38,9 +39,16 @@
         var name = values.length === 1 ? values[0] : null;
 
         // Drop the parameter so a reload or a later visit doesn't force it.
+        // The full href, not path+query: a path starting with // would read
+        // as another host and replaceState would throw. A failure here must
+        // not stop the page from opening.
         function forget() {
-            url.searchParams.delete('session');
-            env.replaceState(url.pathname + url.search + url.hash);
+            try {
+                url.searchParams.delete('session');
+                env.replaceState(url.href);
+            } catch (e) {
+                // leave the address as it is
+            }
         }
 
         if (!isValidSessionName(name)) {

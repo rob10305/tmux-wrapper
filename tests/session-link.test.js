@@ -77,11 +77,11 @@ test('no parameter shows the picker and leaves the address alone', async () => {
 
 test('the parameter is removed from the address after use', async () => {
     const cases = [
-        ['https://t.example/?session=homelab-map', LIST, '/'],
-        ['https://t.example/?session=nope', LIST, '/'],
-        ['https://t.example/?session=a%3Bb', LIST, '/'],
-        ['https://t.example/?a=1&session=main&b=2#h', LIST, '/?a=1&b=2#h'],
-        ['https://t.example/?session=main&session=x', LIST, '/'],
+        ['https://t.example/?session=homelab-map', LIST, 'https://t.example/'],
+        ['https://t.example/?session=nope', LIST, 'https://t.example/'],
+        ['https://t.example/?session=a%3Bb', LIST, 'https://t.example/'],
+        ['https://t.example/?a=1&session=main&b=2#h', LIST, 'https://t.example/?a=1&b=2#h'],
+        ['https://t.example/?session=main&session=x', LIST, 'https://t.example/'],
     ];
     for (const [href, sessions, expected] of cases) {
         const { env, calls } = page(href, sessions);
@@ -114,4 +114,27 @@ test('a repeated parameter is ambiguous and shows the picker', async () => {
     await start(env);
     assert.deepStrictEqual(calls.connected, []);
     assert.strictEqual(calls.picker, 1);
+});
+
+test('a path starting with // keeps the address on this site', async () => {
+    // "//?..." as a relative URL would point at another host, which
+    // replaceState refuses; the full href stays on this origin.
+    const { env, calls } = page('https://t.example//?session=main', LIST);
+    await start(env);
+    assert.deepStrictEqual(calls.replaced, ['https://t.example//']);
+    assert.deepStrictEqual(calls.connected, ['main']);
+});
+
+test('a failing replaceState still opens the session or the picker', async () => {
+    for (const [href, connected, picker] of [
+        ['https://t.example/?session=main', ['main'], 0],
+        ['https://t.example/?session=nope', [], 1],
+        ['https://t.example/?session=a%3Bb', [], 1],
+    ]) {
+        const { env, calls } = page(href, LIST);
+        env.replaceState = function () { throw new Error('SecurityError'); };
+        await start(env);
+        assert.deepStrictEqual(calls.connected, connected, href);
+        assert.strictEqual(calls.picker, picker, href);
+    }
 });
