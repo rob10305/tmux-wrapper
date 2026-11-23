@@ -34,6 +34,7 @@ If you need local password auth or self-hosted TLS, this isn't the project for y
 - **Tmux per user** — every session attaches to a named tmux session as the target unix user
 - **Session caps** — at most 5 WebSocket connections per user, and a configurable cap on distinct tmux sessions (`max_sessions_per_user`, default 5). Creating a session past the cap is refused with a visible message; attaching to an existing one always works
 - **Systemd-managed** — capability-bounded service that only *attaches*: each user's tmux server runs from their own `tmux-server.service` user unit (see `contrib/`), so panes never inherit the wrapper's sandbox. If a user's server is down (e.g. its last session was killed), the wrapper starts that unit; if it can't, the connection is refused with a visible message rather than starting a sandboxed server
+- **Session links** — `/?session=<name>` attaches straight to that tmux session if it already exists; otherwise (unknown or malformed name) the picker shows as usual. A link never creates a session, and the parameter is dropped from the address bar once used
 - **PWA-ready** — installable on iOS/Android, touch-friendly key bar, dictation support, WebGL rendering
 - **Phone scrolling** — finger travel maps to paced wheel ticks with momentum after a flick, so mouse-aware apps (Claude Code fullscreen, vim, less) and tmux copy-mode scroll like a native list; key-bar buttons for page up/down and jump to top/latest
 

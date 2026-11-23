@@ -564,6 +564,13 @@
         }
     });
 
-    // --- Start: show session picker ---
-    loadSessionPicker();
+    // --- Start: open the linked session (/?session=<name>) if it exists,
+    // otherwise show the session picker ---
+    SessionLink.start({
+        href: location.href,
+        fetchSessions: fetchSessions,
+        connect: connectToSession,
+        showPicker: loadSessionPicker,
+        replaceState: function (url) { history.replaceState(history.state, '', url); },
+    });
 })();
