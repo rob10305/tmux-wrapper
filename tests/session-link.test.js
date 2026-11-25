@@ -138,3 +138,47 @@ test('a failing replaceState still opens the session or the picker', async () =>
         assert.strictEqual(calls.picker, picker, href);
     }
 });
+
+// The Create box: spaces become '-', anything else it can't use is explained,
+// never silently ignored.
+const { newSessionName } = require('../static/session-link.js');
+
+test('a plain name is kept as typed', () => {
+    assert.deepStrictEqual(newSessionName('vision'), { name: 'vision' });
+    assert.deepStrictEqual(newSessionName('my-session_2'), { name: 'my-session_2' });
+});
+
+test('spaces become a single dash, ends are trimmed', () => {
+    assert.deepStrictEqual(newSessionName('my project'), { name: 'my-project' });
+    assert.deepStrictEqual(newSessionName('  my   new  project '), { name: 'my-new-project' });
+    assert.deepStrictEqual(newSessionName('a\tb'), { name: 'a-b' });
+    // iPhone non-breaking space from the keyboard counts as a space too
+    assert.deepStrictEqual(newSessionName('my project'), { name: 'my-project' });
+});
+
+test('an empty name asks for one', () => {
+    for (const empty of ['', '   ', null, undefined]) {
+        const r = newSessionName(empty);
+        assert.strictEqual(r.name, undefined, JSON.stringify(empty));
+        assert.strictEqual(r.error, 'Type a name for the new session.');
+    }
+});
+
+test('other characters are explained, naming the first one', () => {
+    assert.deepStrictEqual(newSessionName('vision.2'), {
+        error: 'A name can only use letters, numbers, - and _ (not “.”).',
+    });
+    assert.deepStrictEqual(newSessionName('my project!'), {
+        error: 'A name can only use letters, numbers, - and _ (not “!”).',
+    });
+    assert.deepStrictEqual(newSessionName('café'), {
+        error: 'A name can only use letters, numbers, - and _ (not “é”).',
+    });
+});
+
+test('every name it returns passes the server rule', () => {
+    for (const raw of ['a b', ' x ', 'one  two\tthree', 'A1', 'q_w-e']) {
+        const r = newSessionName(raw);
+        assert.ok(isValidSessionName(r.name), raw);
+    }
+});

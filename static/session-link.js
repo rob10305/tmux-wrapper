@@ -74,5 +74,31 @@
         }
     }
 
-    return { isValidSessionName: isValidSessionName, start: start };
+    // The Create box. Turns what was typed into a session name, or explains
+    // why it can't: { name } or { error }. Spaces (any run of whitespace,
+    // including the iPhone's non-breaking space) become one '-'; any other
+    // character the server would refuse is named in the message, so a tap on
+    // Create never does nothing.
+    function newSessionName(raw) {
+        var text = typeof raw === 'string' ? raw.trim() : '';
+        if (text === '') {
+            return { error: 'Type a name for the new session.' };
+        }
+        var name = text.replace(/\s+/g, '-');
+        if (isValidSessionName(name)) {
+            return { name: name };
+        }
+        var bad = Array.from(name).find(function (c) {
+            return !/^[A-Za-z0-9_-]$/.test(c);
+        });
+        return {
+            error: 'A name can only use letters, numbers, - and _ (not “' + bad + '”).',
+        };
+    }
+
+    return {
+        isValidSessionName: isValidSessionName,
+        newSessionName: newSessionName,
+        start: start,
+    };
 });

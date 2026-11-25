@@ -326,6 +326,13 @@ html, body {
     cursor: pointer;
 }
 
+#new-session-msg {
+    margin: 10px 2px 0;
+    color: #ff9f80;
+    font-size: 14px;
+    line-height: 1.4;
+}
+
 #new-session-btn:hover {
     background: #222;
     border-color: #555;

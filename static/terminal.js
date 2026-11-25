@@ -217,11 +217,29 @@
         return div.innerHTML;
     }
 
+    const newSessionMsg = document.getElementById('new-session-msg');
+
+    function showNewSessionMsg(text) {
+        newSessionMsg.textContent = text || '';
+        newSessionMsg.hidden = !text;
+    }
+
+    // Spaces become '-'; any other character it can't use is explained
+    // instead of the tap silently doing nothing.
     newSessionBtn.addEventListener('click', function () {
-        var name = newSessionInput.value.trim();
-        if (name && /^[a-zA-Z0-9_-]+$/.test(name)) {
-            connectToSession(name);
+        var result = SessionLink.newSessionName(newSessionInput.value);
+        if (result.error) {
+            showNewSessionMsg(result.error);
+            newSessionInput.focus();
+            return;
         }
+        showNewSessionMsg('');
+        newSessionInput.value = '';
+        connectToSession(result.name);
+    });
+
+    newSessionInput.addEventListener('input', function () {
+        showNewSessionMsg('');
     });
 
     newSessionInput.addEventListener('keydown', function (e) {
