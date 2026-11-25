@@ -258,6 +258,7 @@
     }
 
     function switchSession() {
+        if (!historyBox.classList.contains('hidden')) closeHistory();
         if (ws) {
             ws.onclose = null;
             ws.onerror = null;
@@ -279,6 +280,11 @@
     }
 
     function showOverlay(text) {
+        // A message (reconnecting, signing in again) must not hide behind History.
+        var hist = document.getElementById('history');
+        if (hist && !hist.classList.contains('hidden')) {
+            hist.classList.add('hidden');
+        }
         var overlay = document.getElementById('overlay');
         document.getElementById('overlay-text').textContent = text;
         overlay.classList.remove('hidden');
@@ -458,6 +464,11 @@
             return;
         }
 
+        if (key === 'history') {
+            openHistory();
+            return;
+        }
+
         if (key === 'ctrl') {
             ctrlActive = !ctrlActive;
             btnCtrl.classList.toggle('active', ctrlActive);
@@ -575,9 +586,80 @@
         container.addEventListener('touchcancel', onTouchEnd, { passive: true });
     })();
 
+    // --- History: the session's scrollback as a normal scrollable page ---
+    // A snapshot from when it opened (Refresh fetches it again). The text is
+    // only ever set as textContent, never parsed as markup.
+    var historyBox = document.getElementById('history');
+    var historyScroll = document.getElementById('history-scroll');
+    var historyText = document.getElementById('history-text');
+    var historyTitle = document.getElementById('history-title');
+    var historyLoads = 0;
+
+    async function showHistory(stickToBottom) {
+        if (!currentSession) return;
+        var mine = ++historyLoads;
+        var atBottom = historyScroll.scrollHeight - historyScroll.scrollTop - historyScroll.clientHeight < 40;
+        var keepTop = historyScroll.scrollTop;
+        if (!historyText.textContent) {
+            historyText.className = 'message';
+            historyText.textContent = 'Loading\u2026';
+        }
+        var result = await HistoryView.load(fetch.bind(window), currentSession);
+        if (mine !== historyLoads || historyBox.classList.contains('hidden')) return;
+        if (result.kind === 'reauth') {
+            closeHistory();
+            reauthenticate();
+            return;
+        }
+        historyText.className = result.kind === 'text' ? '' : 'message';
+        historyText.textContent = result.text;
+        // Opening lands on the newest line; Refresh keeps the reader's place
+        // unless they were already at the bottom.
+        if (stickToBottom || atBottom) {
+            historyScroll.scrollTop = historyScroll.scrollHeight;
+        } else {
+            historyScroll.scrollTop = keepTop;
+        }
+    }
+
+    function openHistory() {
+        if (!currentSession) return;
+        historyTitle.textContent = 'History \u2014 ' + currentSession;
+        historyText.textContent = '';
+        historyBox.classList.remove('hidden');
+        // Put the phone keyboard away while reading.
+        if (textarea) textarea.blur();
+        showHistory(true);
+    }
+
+    function closeHistory() {
+        historyLoads++;
+        historyBox.classList.add('hidden');
+        historyText.textContent = '';
+        term.focus();
+    }
+
+    document.getElementById('history-refresh').addEventListener('click', function () {
+        showHistory(false);
+    });
+    document.getElementById('history-close').addEventListener('click', closeHistory);
+    document.getElementById('history-top').addEventListener('click', function () {
+        historyScroll.scrollTop = 0;
+    });
+    document.getElementById('history-bottom').addEventListener('click', function () {
+        historyScroll.scrollTop = historyScroll.scrollHeight;
+    });
+    document.addEventListener('keydown', function (e) {
+        if (e.key === 'Escape' && !historyBox.classList.contains('hidden')) {
+            e.preventDefault();
+            closeHistory();
+        }
+    }, true);
+
     // Keep terminal focused
     document.addEventListener('click', function (e) {
-        if (!e.target.closest('#key-bar') && !e.target.closest('#session-picker')) {
+        if (!e.target.closest('#key-bar') && !e.target.closest('#session-picker')
+            && !e.target.closest('#history')) {
             term.focus();
         }
     });

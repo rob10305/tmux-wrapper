@@ -4,7 +4,7 @@ use crate::helper_client::{HelperClient, HelperDead};
 use crate::origin::{client_info, is_same_origin};
 use crate::proto::{ClientInfo, Request, Response as HelperResponse};
 use crate::pty::PtyMaster;
-use crate::tmux::is_valid_session_name;
+use crate::tmux::{MAX_HISTORY, is_valid_session_name};
 use axum::Json;
 use axum::extract::ws::{CloseFrame, Message, WebSocket};
 use axum::extract::{Query, State, WebSocketUpgrade};
@@ -225,6 +225,62 @@ fn kill_response(resp: Option<HelperResponse>) -> Response {
         _ => StatusCode::INTERNAL_SERVER_ERROR,
     }
     .into_response()
+}
+
+/// GET /api/sessions/:name/history — the session's scrollback as plain text,
+/// for the page's History view. Read-only.
+pub async fn history_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    axum::extract::Path(name): axum::extract::Path<String>,
+) -> Response {
+    let identity = match authenticate(&state, &headers).await {
+        Ok(v) => v,
+        Err(status) => return status.into_response(),
+    };
+    if !is_valid_session_name(&name) {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+    let req = Request::History {
+        token: identity.token,
+        name,
+    };
+    history_response(ask_helper(&state, &identity.user_config.unix_user, &req).await)
+}
+
+/// The helper's reply as the HTTP answer. A History reply's fd is read from
+/// the start, at most `MAX_HISTORY` bytes; any stray fd is closed.
+fn history_response(reply: Option<(HelperResponse, Option<OwnedFd>)>) -> Response {
+    use std::io::{Read, Seek, SeekFrom};
+    let status = match reply {
+        Some((HelperResponse::History { .. }, Some(fd))) => {
+            let mut file = std::fs::File::from(fd);
+            let mut text = Vec::new();
+            let read = file
+                .seek(SeekFrom::Start(0))
+                .and_then(|_| (&mut file).take(MAX_HISTORY as u64).read_to_end(&mut text));
+            if let Err(e) = read {
+                error!(error = %e, "reading session history failed");
+                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+            }
+            return (
+                [
+                    ("content-type", "text/plain; charset=utf-8"),
+                    ("cache-control", "no-store"),
+                    ("x-content-type-options", "nosniff"),
+                ],
+                String::from_utf8(text)
+                    .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned()),
+            )
+                .into_response();
+        }
+        Some((HelperResponse::NotFound, _)) => StatusCode::NOT_FOUND,
+        Some((HelperResponse::BadRequest, _)) => StatusCode::BAD_REQUEST,
+        Some((HelperResponse::Unauthorized, _)) => StatusCode::UNAUTHORIZED,
+        Some((HelperResponse::Refused { .. }, _)) => StatusCode::SERVICE_UNAVAILABLE,
+        _ => StatusCode::INTERNAL_SERVER_ERROR,
+    };
+    status.into_response()
 }
 
 pub async fn ws_handler(
@@ -650,6 +706,89 @@ mod tests {
         );
         assert_eq!(
             status(Some(HelperResponse::Sessions { sessions: vec![] })),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+        assert_eq!(status(None), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    /// A file descriptor holding `data`, like the helper's memfd.
+    fn fd_with(data: &[u8]) -> OwnedFd {
+        use std::io::{Seek, SeekFrom, Write};
+        static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "tmuxwrapper-history-test-{}-{}",
+            std::process::id(),
+            N.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        let mut f = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .unwrap();
+        std::fs::remove_file(&path).unwrap();
+        f.write_all(data).unwrap();
+        // The front reads from the start whatever the offset was.
+        f.seek(SeekFrom::Start(1)).unwrap();
+        f.into()
+    }
+
+    #[tokio::test]
+    async fn history_reply_is_plain_text_never_cached() {
+        let resp = history_response(Some((
+            HelperResponse::History { bytes: 12 },
+            Some(fd_with(b"hello\nworld\n")),
+        )));
+        assert_eq!(resp.status(), StatusCode::OK);
+        let h = resp.headers();
+        assert_eq!(h["content-type"], "text/plain; charset=utf-8");
+        assert_eq!(h["cache-control"], "no-store");
+        assert_eq!(h["x-content-type-options"], "nosniff");
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(&body[..], b"hello\nworld\n");
+    }
+
+    #[tokio::test]
+    async fn history_with_broken_utf8_still_reads() {
+        let resp = history_response(Some((
+            HelperResponse::History { bytes: 4 },
+            Some(fd_with(b"a\xffb\n")),
+        )));
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(String::from_utf8(body.to_vec()).unwrap(), "a\u{fffd}b\n");
+    }
+
+    #[test]
+    fn history_statuses() {
+        let status = |r| history_response(r).status();
+        assert_eq!(
+            status(Some((HelperResponse::History { bytes: 3 }, None))),
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "History without its fd"
+        );
+        assert_eq!(
+            status(Some((HelperResponse::NotFound, None))),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            status(Some((HelperResponse::BadRequest, None))),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            status(Some((HelperResponse::Unauthorized, Some(some_fd())))),
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            status(Some((refused("could not read the session's history"), None))),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(
+            status(Some((HelperResponse::Killed, None))),
             StatusCode::INTERNAL_SERVER_ERROR
         );
         assert_eq!(status(None), StatusCode::INTERNAL_SERVER_ERROR);

@@ -1,7 +1,8 @@
 //! Wire protocol between the unprivileged front and the per-user helper.
 //!
 //! One JSON message per `SOCK_SEQPACKET` datagram. `Response::Opened` is
-//! accompanied by the PTY master fd, passed with `SCM_RIGHTS`.
+//! accompanied by the PTY master fd, and `Response::History` by a read-only
+//! memfd holding the text, both passed with `SCM_RIGHTS`.
 
 use nix::cmsg_space;
 use nix::fcntl::{FcntlArg, OFlag, fcntl};
@@ -30,6 +31,11 @@ pub enum Request {
         token: String,
         name: String,
     },
+    /// The session's scrollback as text, for the page's History view.
+    History {
+        token: String,
+        name: String,
+    },
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
@@ -38,6 +44,7 @@ pub enum Response {
     Opened { expires_at: u64 }, // accompanied by exactly one fd (PTY master)
     Sessions { sessions: Vec<SessionInfo> },
     Killed,
+    History { bytes: u64 }, // accompanied by exactly one fd: a memfd holding the text
     NotFound,
     Refused { reason: String },
     Unauthorized,
@@ -239,6 +246,10 @@ mod tests {
                 token: "t".into(),
                 name: "n".into(),
             },
+            Request::History {
+                token: "t".into(),
+                name: "n".into(),
+            },
         ]
     }
 
@@ -253,6 +264,7 @@ mod tests {
                 }],
             },
             Response::Killed,
+            Response::History { bytes: 12 },
             Response::NotFound,
             Response::Refused { reason: "r".into() },
             Response::Unauthorized,

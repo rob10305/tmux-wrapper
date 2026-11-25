@@ -21,7 +21,7 @@ use crate::helper_client::HelperClient;
 use crate::privdrop::drop_privileges;
 use crate::proto::seqpacket_pair;
 use crate::user::{ResolvedUser, shares_identity};
-use crate::ws::{AppState, kill_session_handler, sessions_handler, ws_handler};
+use crate::ws::{AppState, history_handler, kill_session_handler, sessions_handler, ws_handler};
 use axum::Router;
 use axum::routing::{delete, get};
 use nix::sys::prctl;
@@ -286,6 +286,7 @@ async fn run_front(config: Config, forked: Vec<ForkedHelper>) {
         .route("/ws", get(ws_handler))
         .route("/api/sessions", get(sessions_handler))
         .route("/api/sessions/{name}", delete(kill_session_handler))
+        .route("/api/sessions/{name}/history", get(history_handler))
         .fallback_service(static_service)
         .layer(no_cache)
         .layer(csp)

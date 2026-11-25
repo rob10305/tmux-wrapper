@@ -9,7 +9,7 @@ use std::process::Output;
 use std::time::Duration;
 use tokio::process::Command;
 
-const TMUX: &str = "/usr/bin/tmux";
+pub(crate) const TMUX: &str = "/usr/bin/tmux";
 
 /// Session names may only contain [a-zA-Z0-9_-].
 pub fn is_valid_session_name(name: &str) -> bool {
@@ -168,6 +168,70 @@ pub async fn kill_session(name: &str, socket: Option<&Path>) -> io::Result<bool>
             "tmux kill-session failed: {}",
             stderr.trim()
         )))
+    }
+}
+
+/// Most history handed to the page: the newest 8 MiB (far more than 20,000
+/// lines of a terminal).
+pub const MAX_HISTORY: usize = 8 * 1024 * 1024;
+
+/// Most history lines asked of tmux (its own history-limit may be larger).
+const MAX_HISTORY_LINES: u32 = 100_000;
+
+/// The session's whole scrollback plus what is on screen, as plain text
+/// (no colours), wrapped lines joined, oldest first. `None` when there is no
+/// such session. Read-only: `capture-pane` changes nothing in the session.
+pub async fn capture_history(name: &str, socket: Option<&Path>) -> io::Result<Option<Vec<u8>>> {
+    let mut cmd = tmux_command(socket);
+    // `=name:` is the exact session (never a prefix match), its current
+    // window's active pane; `-S -` starts at the oldest history line.
+    // `-S -{MAX_HISTORY_LINES}` bounds what tmux prints however large the
+    // user's history-limit is; `-T` drops the padding spaces at line ends.
+    cmd.args(["capture-pane", "-p", "-J", "-T", "-S"])
+        .arg(format!("-{MAX_HISTORY_LINES}"))
+        .arg("-t")
+        .arg(format!("={name}:"));
+    let out = output_within(cmd, SUBPROCESS_TIMEOUT).await?;
+    if out.status.success() {
+        return Ok(Some(keep_newest(trim_trailing_blank(out.stdout), MAX_HISTORY)));
+    }
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    if stderr.contains("can't find")
+        || classify_list_sessions(false, "", &stderr) == TmuxServer::NotRunning
+    {
+        Ok(None)
+    } else {
+        Err(io::Error::other(format!(
+            "tmux capture-pane failed: {}",
+            stderr.trim()
+        )))
+    }
+}
+
+/// Drop the empty screen rows below the last output; end with one newline.
+fn trim_trailing_blank(mut text: Vec<u8>) -> Vec<u8> {
+    while text.last().is_some_and(|b| b.is_ascii_whitespace()) {
+        text.pop();
+    }
+    if !text.is_empty() {
+        text.push(b'\n');
+    }
+    text
+}
+
+/// At most `max` bytes, cut at a line start so no line is shown half; a
+/// single line longer than `max` keeps its tail.
+fn keep_newest(text: Vec<u8>, max: usize) -> Vec<u8> {
+    if text.len() <= max {
+        return text;
+    }
+    let cut = text.len() - max;
+    if cut > 0 && text[cut - 1] == b'\n' {
+        return text[cut..].to_vec();
+    }
+    match text[cut..].iter().position(|&b| b == b'\n') {
+        Some(i) if cut + i + 1 < text.len() => text[cut + i + 1..].to_vec(),
+        _ => text[cut..].to_vec(),
     }
 }
 
@@ -378,5 +442,82 @@ mod tests {
                 },
             ]
         );
+    }
+
+    /// A session on the scratch server running `cmd`, sized small so most
+    /// output scrolls into history.
+    fn session_running(t: &ScratchTmux, name: &str, cmd: &str) {
+        let ok = std::process::Command::new(TMUX)
+            .env_remove("TMUX")
+            .arg("-S")
+            .arg(t.socket())
+            .args(["new-session", "-d", "-s", name, "-x", "80", "-y", "10", cmd])
+            .status()
+            .is_ok_and(|s| s.success());
+        assert!(ok, "could not start {name}");
+    }
+
+    async fn history_when(t: &ScratchTmux, name: &str, done: &str) -> Vec<u8> {
+        for _ in 0..60 {
+            if let Ok(Some(out)) = capture_history(name, Some(t.socket())).await
+                && String::from_utf8_lossy(&out).contains(done)
+            {
+                return out;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        panic!("{name} never showed {done:?}");
+    }
+
+    #[tokio::test]
+    async fn history_holds_scrolled_off_lines_in_order_without_trailing_blanks() {
+        let Some(t) = ScratchTmux::start("base") else {
+            return;
+        };
+        session_running(&t, "hist", "seq 1 300; echo END; sleep 30");
+        let out = history_when(&t, "hist", "END").await;
+        let text = String::from_utf8(out).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines[0], "1", "starts at the oldest line");
+        assert!(text.contains("\n150\n"));
+        let tail = &text[text.len() - 20..];
+        assert!(text.ends_with("END\n"), "blank screen rows are trimmed: {tail:?}");
+    }
+
+    #[tokio::test]
+    async fn history_names_the_exact_session() {
+        let Some(t) = ScratchTmux::start("base") else {
+            return;
+        };
+        session_running(&t, "hist2", "echo SECOND; sleep 30");
+        session_running(&t, "hist", "echo FIRST; sleep 30");
+        let out = history_when(&t, "hist", "FIRST").await;
+        assert!(!String::from_utf8_lossy(&out).contains("SECOND"));
+    }
+
+    #[tokio::test]
+    async fn history_of_a_missing_session_is_none() {
+        let Some(t) = ScratchTmux::start("base") else {
+            return;
+        };
+        assert_eq!(capture_history("nope", Some(t.socket())).await.unwrap(), None);
+    }
+
+    #[test]
+    fn long_history_keeps_the_newest_whole_lines() {
+        let text = b"aaaa\nbbbb\ncccc\n".to_vec();
+        // 9 bytes would cut "bbbb" in half: start at the next whole line.
+        assert_eq!(keep_newest(text.clone(), 9), b"cccc\n".to_vec());
+        assert_eq!(keep_newest(text.clone(), 10), b"bbbb\ncccc\n".to_vec());
+        assert_eq!(keep_newest(text.clone(), 100), text);
+        // One huge line: keep its tail rather than nothing.
+        assert_eq!(keep_newest(b"0123456789".to_vec(), 4), b"6789".to_vec());
+    }
+
+    #[test]
+    fn trailing_blank_lines_are_trimmed() {
+        assert_eq!(trim_trailing_blank(b"a\nb\n\n   \n\n".to_vec()), b"a\nb\n".to_vec());
+        assert_eq!(trim_trailing_blank(b"\n\n".to_vec()), b"".to_vec());
+        assert_eq!(trim_trailing_blank(b"a".to_vec()), b"a\n".to_vec());
     }
 }

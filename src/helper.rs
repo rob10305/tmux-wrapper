@@ -10,11 +10,11 @@ use crate::notify::Notifier;
 use crate::proto::{AsyncSeqpacket, ClientInfo, Request, Response};
 use crate::pty::spawn_tmux_client;
 use crate::tmux::{
-    TmuxServer, is_valid_session_name, kill_session, list_sessions, query_server,
-    refuses_new_session, start_server_unit,
+    TmuxServer, capture_history, is_valid_session_name, kill_session, list_sessions,
+    query_server, refuses_new_session, start_server_unit,
 };
 use std::io;
-use std::os::fd::{AsFd, OwnedFd};
+use std::os::fd::{AsFd, AsRawFd, OwnedFd};
 use std::path::PathBuf;
 use tracing::{debug, error, info, warn};
 
@@ -23,6 +23,7 @@ const NO_TMUX_SERVER: &str = "tmux server isn't running — start tmux-server.se
 const SESSION_LIMIT: &str = "session limit reached — kill an old session first";
 const SPAWN_FAILED: &str = "could not start terminal";
 const KILL_FAILED: &str = "could not kill session";
+const HISTORY_FAILED: &str = "could not read the session's history";
 
 pub struct HelperCtx {
     pub user: UserConfig,
@@ -64,9 +65,10 @@ fn valid_name(name: &str) -> bool {
 /// PTY master fd; every other reply carries none.
 pub async fn handle(ctx: &HelperCtx, req: Request) -> (Response, Option<OwnedFd>) {
     let token = match &req {
-        Request::Open { token, .. } | Request::List { token } | Request::Kill { token, .. } => {
-            token
-        }
+        Request::Open { token, .. }
+        | Request::List { token }
+        | Request::Kill { token, .. }
+        | Request::History { token, .. } => token,
     };
     let claims = match authorize(ctx, token).await {
         Ok(claims) => claims,
@@ -99,7 +101,73 @@ pub async fn handle(ctx: &HelperCtx, req: Request) -> (Response, Option<OwnedFd>
             };
             (resp, None)
         }
+        Request::History { name, .. } => history(&name, socket).await,
     }
+}
+
+/// The session's scrollback, handed over in a sealed memfd: the text can be
+/// far larger than one protocol message, and the front can read it but not
+/// change it. Read-only for the session.
+async fn history(name: &str, socket: Option<&std::path::Path>) -> (Response, Option<OwnedFd>) {
+    if !valid_name(name) {
+        return (Response::BadRequest, None);
+    }
+    let failed = || {
+        (
+            Response::Refused {
+                reason: HISTORY_FAILED.into(),
+            },
+            None,
+        )
+    };
+    let text = match capture_history(name, socket).await {
+        Ok(Some(text)) => text,
+        Ok(None) => return (Response::NotFound, None),
+        Err(e) => {
+            warn!(session = %name, error = %e, "capture-pane failed");
+            return failed();
+        }
+    };
+    match sealed_memfd(&text) {
+        Ok(fd) => (
+            Response::History {
+                bytes: text.len() as u64,
+            },
+            Some(fd),
+        ),
+        Err(e) => {
+            error!(session = %name, error = %e, "could not hand over history");
+            failed()
+        }
+    }
+}
+
+/// An anonymous in-memory file holding `data`, positioned at the start and
+/// sealed against any write, shrink or grow.
+fn sealed_memfd(data: &[u8]) -> io::Result<OwnedFd> {
+    use nix::libc;
+    use std::io::{Seek, SeekFrom, Write};
+    use std::os::fd::FromRawFd;
+    // SAFETY: a valid NUL-terminated name and flags; the result is checked.
+    let raw = unsafe {
+        libc::memfd_create(
+            c"tmuxwrapper-history".as_ptr(),
+            libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING,
+        )
+    };
+    if raw < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: `raw` is a fresh descriptor that nothing else owns.
+    let mut file = std::fs::File::from(unsafe { OwnedFd::from_raw_fd(raw) });
+    file.write_all(data)?;
+    file.seek(SeekFrom::Start(0))?;
+    let seals = libc::F_SEAL_SHRINK | libc::F_SEAL_GROW | libc::F_SEAL_WRITE | libc::F_SEAL_SEAL;
+    // SAFETY: fcntl on a descriptor we own.
+    if unsafe { libc::fcntl(file.as_fd().as_raw_fd(), libc::F_ADD_SEALS, seals) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(OwnedFd::from(file))
 }
 
 async fn open(
@@ -373,6 +441,10 @@ mod tests {
                 token: token.into(),
                 name: name.into(),
             },
+            Request::History {
+                token: token.into(),
+                name: name.into(),
+            },
         ]
     }
 
@@ -433,6 +505,7 @@ mod tests {
                     Request::Open { session, .. } => format!("{what}: open {session}"),
                     Request::List { .. } => format!("{what}: list"),
                     Request::Kill { name, .. } => format!("{what}: kill {name}"),
+                    Request::History { name, .. } => format!("{what}: history {name}"),
                 };
                 let (resp, fd) = handle(&c, req).await;
                 assert_eq!(resp, Response::Unauthorized, "{desc}");
@@ -749,5 +822,82 @@ mod tests {
             .await
             .expect("serve did not return after the front closed")
             .unwrap();
+    }
+
+    /// Everything in the memfd a History reply carries, read from the start.
+    fn read_all(fd: OwnedFd) -> Vec<u8> {
+        use std::io::Read;
+        let mut f = std::fs::File::from(fd);
+        let mut out = Vec::new();
+        f.read_to_end(&mut out).unwrap();
+        out
+    }
+
+    #[tokio::test]
+    async fn history_hands_over_the_session_text_in_a_sealed_memfd() {
+        let Some((dec, t)) = setup("base") else {
+            return;
+        };
+        let ok = std::process::Command::new(crate::tmux::TMUX)
+            .env_remove("TMUX")
+            .arg("-S")
+            .arg(t.socket())
+            .args(["new-session", "-d", "-s", "chat", "-x", "80", "-y", "5"])
+            .arg("seq 1 50; echo DONE; sleep 30")
+            .status()
+            .is_ok_and(|s| s.success());
+        assert!(ok);
+        let c = ctx(vec![dec], t.socket(), 5);
+        let req = || Request::History {
+            token: good_token(),
+            name: "chat".into(),
+        };
+        let mut text = String::new();
+        for _ in 0..60 {
+            let (resp, fd) = handle(&c, req()).await;
+            let Response::History { bytes } = resp else {
+                panic!("expected History, got {resp:?}");
+            };
+            let fd = fd.expect("History without an fd");
+            // Sealed: whoever receives it cannot change it.
+            {
+                use std::io::Write;
+                let mut f = std::fs::File::from(fd.try_clone().unwrap());
+                assert!(f.write_all(b"x").is_err(), "memfd is writable");
+            }
+            let got = read_all(fd);
+            assert_eq!(got.len() as u64, bytes);
+            text = String::from_utf8(got).unwrap();
+            if text.contains("DONE") {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(text.starts_with("1\n2\n"), "{text:?}");
+        assert!(text.ends_with("DONE\n"), "{text:?}");
+        // Reading history changes nothing.
+        let mut names = session_names(t.socket()).await;
+        names.sort();
+        assert_eq!(names, vec!["base".to_string(), "chat".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn history_of_a_missing_or_badly_named_session_carries_no_fd() {
+        let Some((dec, t)) = setup("base") else {
+            return;
+        };
+        let c = ctx(vec![dec], t.socket(), 5);
+        let history = |name: &str| Request::History {
+            token: good_token(),
+            name: name.into(),
+        };
+        let (resp, fd) = handle(&c, history("nope")).await;
+        assert_eq!(resp, Response::NotFound);
+        assert!(fd.is_none());
+        for bad in ["", "../etc", "a;b", "base:0"] {
+            let (resp, fd) = handle(&c, history(bad)).await;
+            assert_eq!(resp, Response::BadRequest, "{bad:?}");
+            assert!(fd.is_none());
+        }
     }
 }

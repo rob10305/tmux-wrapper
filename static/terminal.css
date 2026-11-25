@@ -347,3 +347,109 @@ html, body {
     overflow-y: auto !important;
     -webkit-overflow-scrolling: touch;
 }
+
+/* History: the session's scrollback as an ordinary page with a scrollbar */
+#btn-history {
+    background: #1a2e1a;
+    border-color: #353;
+    flex: 0 0 auto;
+    padding-left: 10px;
+    padding-right: 10px;
+}
+
+#history {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 250;
+    background: #000;
+    display: flex;
+    flex-direction: column;
+}
+
+#history.hidden {
+    display: none;
+}
+
+#history-bar {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px;
+    padding-top: calc(8px + env(safe-area-inset-top));
+    background: #1a1a1a;
+    border-bottom: 1px solid #333;
+}
+
+#history-title {
+    flex: 1;
+    min-width: 0;
+    color: #aaa;
+    font-size: 14px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+#history-bar button {
+    padding: 9px 10px;
+    background: #2a2a2a;
+    color: #ddd;
+    border: 1px solid #444;
+    border-radius: 6px;
+    font-size: 14px;
+    touch-action: manipulation;
+    cursor: pointer;
+}
+
+#history-bar button:active {
+    background: #444;
+}
+
+#history-scroll {
+    flex: 1;
+    overflow-y: scroll;
+    overflow-x: hidden;
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior: contain;
+    padding: 10px 12px;
+    padding-bottom: calc(10px + env(safe-area-inset-bottom));
+    scrollbar-width: auto;
+    scrollbar-color: #666 #111;
+}
+
+#history-scroll::-webkit-scrollbar {
+    width: 14px;
+}
+
+#history-scroll::-webkit-scrollbar-track {
+    background: #111;
+}
+
+#history-scroll::-webkit-scrollbar-thumb {
+    background: #555;
+    border-radius: 7px;
+    border: 3px solid #111;
+}
+
+#history-text {
+    margin: 0;
+    color: #e6e6e6;
+    font-family: Menlo, Monaco, "Courier New", monospace;
+    font-size: 13px;
+    line-height: 1.45;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    user-select: text;
+    -webkit-user-select: text;
+}
+
+#history-text.message {
+    color: #999;
+    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+    font-size: 15px;
+    text-align: center;
+    padding-top: 40px;
+}

@@ -11,12 +11,13 @@
     <link rel="apple-touch-icon" href="/icon-192.png">
     <title>Terminal</title>
     <link rel="stylesheet" href="/vendor/xterm.css">
-    <link rel="stylesheet" href="/terminal.css?v=10">
+    <link rel="stylesheet" href="/terminal.css?v=11">
 </head>
 <body>
     <div id="terminal"></div>
     <div id="key-bar">
         <button data-key="sessions" id="btn-sessions">&#9776;</button>
+        <button data-key="history" id="btn-history" aria-label="History: scroll back through this session" title="History">History</button>
         <button data-key="PageUp" class="scroll-key" aria-label="Page up" title="Page up">&#8670;</button>
         <button data-key="PageDown" class="scroll-key" aria-label="Page down" title="Page down">&#8671;</button>
         <button data-key="ScrollTop" class="scroll-key" aria-label="Scroll to top" title="Scroll to top">&#10514;</button>
@@ -43,6 +44,16 @@
             <p id="new-session-msg" role="alert" hidden></p>
         </div>
     </div>
+    <div id="history" class="hidden" role="dialog" aria-label="Session history">
+        <div id="history-bar">
+            <span id="history-title"></span>
+            <button id="history-top" aria-label="Go to the oldest line">Top</button>
+            <button id="history-bottom" aria-label="Go to the newest line">End</button>
+            <button id="history-refresh">Refresh</button>
+            <button id="history-close">Close</button>
+        </div>
+        <div id="history-scroll"><pre id="history-text"></pre></div>
+    </div>
     <div id="confirm-dialog" class="hidden">
         <div id="confirm-inner">
             <p id="confirm-msg"></p>
@@ -62,6 +73,7 @@
     <script src="/scroll-engine.js"></script>
     <script src="/close-action.js"></script>
     <script src="/session-link.js?v=3"></script>
-    <script src="/terminal.js?v=17"></script>
+    <script src="/history-view.js?v=1"></script>
+    <script src="/terminal.js?v=18"></script>
 </body>
 </html>

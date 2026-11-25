@@ -507,3 +507,39 @@ async fn no_zombies_after_sockets_close() {
         "zombies (pid, ppid, state) after sockets closed: {zombies:?}"
     );
 }
+
+/// The History view's text comes from the real session through the helper,
+/// only for a valid token from this site, and never for a missing session.
+#[tokio::test]
+#[ignore]
+async fn history_returns_the_sessions_text_only_to_its_user() {
+    let mut ws = ws_connect("e2e-a", &good_token()).await;
+    send_line(&mut ws, "echo hist-$((4000+321))z\r").await;
+    expect_output(&mut ws, "hist-4321z", 5).await;
+    let _ = ws.close(None).await;
+
+    let http = reqwest::Client::new();
+    let get = |path: &'static str, t: String, origin: Option<&'static str>| {
+        let http = http.clone();
+        async move {
+            let mut req = http.get(http_url(path)).header("Cf-Access-Jwt-Assertion", t);
+            if let Some(o) = origin {
+                req = req.header("Origin", o);
+            }
+            req.send().await.unwrap()
+        }
+    };
+    let ok = get("/api/sessions/e2e-a/history", good_token(), None).await;
+    assert_eq!(ok.status(), 200);
+    let cache = ok.headers()["cache-control"].to_str().unwrap().to_string();
+    assert!(cache.contains("no-store"), "cache-control: {cache}");
+    let text = ok.text().await.unwrap();
+    assert!(text.contains("hist-4321z"), "marker missing from history");
+
+    let p = "/api/sessions/e2e-a/history";
+    assert_eq!(get(p, mint("stranger@example.com", now() + 600), None).await.status(), 403);
+    assert_eq!(get(p, mint(EMAIL, now() - 300), None).await.status(), 401);
+    assert_eq!(get(p, good_token(), Some("https://evil.example")).await.status(), 403);
+    let missing = get("/api/sessions/no-such-session/history", good_token(), None).await;
+    assert_eq!(missing.status(), 404);
+}
