@@ -612,7 +612,11 @@
             return;
         }
         historyText.className = result.kind === 'text' ? '' : 'message';
-        historyText.textContent = result.text;
+        if (result.kind === 'text') {
+            drawColouredText(historyText, AnsiText.parse(result.text));
+        } else {
+            historyText.textContent = result.text;
+        }
         // Opening lands on the newest line; Refresh keeps the reader's place
         // unless they were already at the bottom.
         if (stickToBottom || atBottom) {
@@ -620,6 +624,24 @@
         } else {
             historyScroll.scrollTop = keepTop;
         }
+    }
+
+    // Each segment becomes a text node, styled through a span's style
+    // properties: session output is never read as HTML.
+    function drawColouredText(el, segs) {
+        var frag = document.createDocumentFragment();
+        segs.forEach(function (seg) {
+            if (!seg.style) {
+                frag.appendChild(document.createTextNode(seg.text));
+                return;
+            }
+            var span = document.createElement('span');
+            Object.assign(span.style, AnsiText.css(seg.style));
+            span.textContent = seg.text;
+            frag.appendChild(span);
+        });
+        el.textContent = '';
+        el.appendChild(frag);
     }
 
     function openHistory() {

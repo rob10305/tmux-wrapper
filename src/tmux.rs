@@ -178,16 +178,18 @@ pub const MAX_HISTORY: usize = 8 * 1024 * 1024;
 /// Most history lines asked of tmux (its own history-limit may be larger).
 const MAX_HISTORY_LINES: u32 = 100_000;
 
-/// The session's whole scrollback plus what is on screen, as plain text
-/// (no colours), wrapped lines joined, oldest first. `None` when there is no
+/// The session's whole scrollback plus what is on screen, with its colours
+/// as terminal escape codes (the page renders them as plain styled text),
+/// wrapped lines joined, oldest first. `None` when there is no
 /// such session. Read-only: `capture-pane` changes nothing in the session.
 pub async fn capture_history(name: &str, socket: Option<&Path>) -> io::Result<Option<Vec<u8>>> {
     let mut cmd = tmux_command(socket);
     // `=name:` is the exact session (never a prefix match), its current
     // window's active pane; `-S -` starts at the oldest history line.
     // `-S -{MAX_HISTORY_LINES}` bounds what tmux prints however large the
-    // user's history-limit is; `-T` drops the padding spaces at line ends.
-    cmd.args(["capture-pane", "-p", "-J", "-T", "-S"])
+    // user's history-limit is; `-T` drops the padding spaces at line ends;
+    // `-e` keeps colours and bold/underline as SGR escape codes.
+    cmd.args(["capture-pane", "-p", "-e", "-J", "-T", "-S"])
         .arg(format!("-{MAX_HISTORY_LINES}"))
         .arg("-t")
         .arg(format!("={name}:"));
@@ -482,6 +484,17 @@ mod tests {
         assert!(text.contains("\n150\n"));
         let tail = &text[text.len() - 20..];
         assert!(text.ends_with("END\n"), "blank screen rows are trimmed: {tail:?}");
+    }
+
+    #[tokio::test]
+    async fn history_keeps_the_sessions_colours() {
+        let Some(t) = ScratchTmux::start("base") else {
+            return;
+        };
+        session_running(&t, "hist", "printf 'plain \\033[31mRED\\033[0m done\\n'; sleep 30");
+        let out = history_when(&t, "hist", "done").await;
+        let text = String::from_utf8_lossy(&out);
+        assert!(text.contains("\x1b[31mRED"), "colour codes kept: {text:?}");
     }
 
     #[tokio::test]
