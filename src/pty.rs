@@ -3,7 +3,7 @@ use nix::libc;
 use nix::pty::openpty;
 use std::io;
 use std::os::fd::{AsRawFd, OwnedFd, RawFd};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::process::Stdio;
 use std::task::{Context, Poll};
@@ -51,6 +51,22 @@ fn set_nonblocking(fd: &OwnedFd) -> io::Result<()> {
     Ok(())
 }
 
+/// Where a NEW session starts: its project folder `~/lab/<session>` when that
+/// exists, else `~/lab`, else the home folder. An existing session is only
+/// attached (`-A` ignores `-c`), so this never moves one. The name has already
+/// passed is_valid_session_name, so it cannot climb out of `~/lab`.
+pub fn start_dir(home: &Path, session: &str) -> PathBuf {
+    let lab = home.join("lab");
+    let project = lab.join(session);
+    if project.is_dir() {
+        project
+    } else if lab.is_dir() {
+        lab
+    } else {
+        home.to_path_buf()
+    }
+}
+
 /// Spawn `tmux new-session -A -s <session>` attached to a fresh PTY, as the
 /// current user. Returns the PTY master and the client process.
 /// Must be called from within a tokio runtime. Dropping the master hangs the
@@ -71,7 +87,7 @@ pub fn spawn_tmux_client(
         cmd.arg("-S").arg(sock);
     }
     cmd.args(["new-session", "-A", "-s", session, "-c"])
-        .arg(home)
+        .arg(start_dir(home, session))
         .current_dir(home)
         .env("TERM", "xterm-256color")
         .env_remove("TMUX")
@@ -223,10 +239,86 @@ impl AsyncWrite for &PtyMaster {
 
 #[cfg(test)]
 mod tests {
-    use super::{PtyMaster, spawn_tmux_client};
+    use super::{PtyMaster, spawn_tmux_client, start_dir};
     use crate::test_support::ScratchTmux;
+    use std::path::PathBuf;
     use std::time::Duration;
     use tokio::io::AsyncReadExt;
+
+    /// A fresh fake home folder for one test.
+    fn fake_home(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "tmuxwrapper-home-{}-{}",
+            tag,
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn a_new_session_starts_in_its_lab_project_folder() {
+        let home = fake_home("project");
+        std::fs::create_dir_all(home.join("lab/vision")).unwrap();
+        assert_eq!(start_dir(&home, "vision"), home.join("lab/vision"));
+        std::fs::remove_dir_all(&home).unwrap();
+    }
+
+    #[test]
+    fn without_a_project_folder_it_starts_in_lab() {
+        let home = fake_home("lab");
+        std::fs::create_dir_all(home.join("lab/other")).unwrap();
+        assert_eq!(start_dir(&home, "vision"), home.join("lab"));
+        // A file with the session's name is not a project folder.
+        std::fs::write(home.join("lab/notes"), "x").unwrap();
+        assert_eq!(start_dir(&home, "notes"), home.join("lab"));
+        std::fs::remove_dir_all(&home).unwrap();
+    }
+
+    #[test]
+    fn without_lab_it_starts_in_home() {
+        let home = fake_home("nolab");
+        assert_eq!(start_dir(&home, "vision"), home);
+        std::fs::remove_dir_all(&home).unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_spawned_session_opens_in_the_project_folder() {
+        let Some(t) = ScratchTmux::start("base") else {
+            eprintln!("skipping: /usr/bin/tmux not available");
+            return;
+        };
+        let home = fake_home("spawn");
+        std::fs::create_dir_all(home.join("lab/proj")).unwrap();
+        let (master, mut child) = spawn_tmux_client("proj", &home, Some(t.socket())).unwrap();
+        let mut pty = PtyMaster::from_fd(master).unwrap();
+        let mut buf = [0u8; 4096];
+        let _ = tokio::time::timeout(Duration::from_secs(2), pty.read(&mut buf)).await;
+        // The client creates the session a moment after its first output.
+        for _ in 0..40 {
+            let names = crate::tmux::list_sessions(Some(t.socket())).await;
+            if names.iter().any(|s| s.name == "proj") {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        // session_path is the folder `-c` set; the pane's own folder can still
+        // read as the server's for a moment while its shell starts.
+        let out = tokio::process::Command::new("/usr/bin/tmux")
+            .arg("-S")
+            .arg(t.socket())
+            .env_remove("TMUX")
+            .args(["display", "-p", "-t", "proj", "#{session_path}"])
+            .output()
+            .await
+            .unwrap();
+        let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        assert_eq!(PathBuf::from(path), home.join("lab/proj"));
+        drop(pty);
+        let _ = tokio::time::timeout(Duration::from_secs(2), child.wait()).await;
+        std::fs::remove_dir_all(&home).unwrap();
+    }
 
     #[tokio::test]
     async fn tmux_client_gets_a_pty_and_exits_when_master_drops() {
