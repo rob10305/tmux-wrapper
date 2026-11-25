@@ -11,7 +11,7 @@
     <link rel="apple-touch-icon" href="/icon-192.png">
     <title>Terminal</title>
     <link rel="stylesheet" href="/vendor/xterm.css">
-    <link rel="stylesheet" href="/terminal.css?v=11">
+    <link rel="stylesheet" href="/terminal.css?v=12">
 </head>
 <body>
     <div id="terminal"></div>
@@ -33,6 +33,7 @@
         <button data-key="ArrowLeft">&larr;</button>
         <button data-key="ArrowRight">&rarr;</button>
     </div>
+    <button id="btn-history-corner" aria-label="History: scroll back through this session" title="History: scroll back through this session">History</button>
     <div id="session-picker" class="hidden">
         <div id="session-picker-inner">
             <h2>tmux sessions</h2>
@@ -74,6 +75,6 @@
     <script src="/close-action.js"></script>
     <script src="/session-link.js?v=3"></script>
     <script src="/history-view.js?v=1"></script>
-    <script src="/terminal.js?v=18"></script>
+    <script src="/terminal.js?v=19"></script>
 </body>
 </html>

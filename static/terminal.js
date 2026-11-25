@@ -643,6 +643,7 @@
         showHistory(false);
     });
     document.getElementById('history-close').addEventListener('click', closeHistory);
+    document.getElementById('btn-history-corner').addEventListener('click', openHistory);
     document.getElementById('history-top').addEventListener('click', function () {
         historyScroll.scrollTop = 0;
     });
